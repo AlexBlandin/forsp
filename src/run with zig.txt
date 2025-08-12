@@ -1,0 +1,146 @@
+
+🌅 04:57 | 🌇 21:33 | Wednesday the 12th of June | 2024-06-12 | UNIX: ~1718146864s
+
+   …\code\third_party\forsp      11:00 ♥  zig cc -std=c99 -Wall -Werror -O2 -g -o forsp.exe forsp.c
+
+   …\code\third_party\forsp      11:02 ♥  forsp
+usage: forsp <path>
+
+   …\code\third_party\forsp      11:02 ♥  forsp examples\church-numerals.fp
+0
+8
+17
+18
+56
+0
+0
+8
+0
+0
+8
+80
+80
+1
+81
+64
+
+   …\code\third_party\forsp      11:02 ♥  forsp examples\currying.fp
+9
+9
+9
+
+   …\code\third_party\forsp      11:02 ♥  forsp examples\demo.fp
+range
+(0 1 2 3 4)
+map
+(0 10 20 30 40)
+cdr
+(10 20 30 40)
+(foo . bar)
+123
+()
+t
+0
+1
+2
+3
+4
+5
+6
+7
+8
+9
+0
+10
+20
+30
+40
+50
+60
+70
+80
+90
+length
+4
+depth2
+2
+depth0
+0
+reverse
+(3 2 1)
+0
+4
+(1 2 3)
+(10 1 2 3 4 5 6 7 8 9)
+120
+(4 5)
+17
+
+   …\code\third_party\forsp      11:02 ♥  forsp examples\factorial.fp
+120
+
+   …\code\third_party\forsp      11:02 ♥  forsp examples\fibonacci-functional.fp
+1
+1
+2
+3
+5
+8
+13
+21
+34
+
+   …\code\third_party\forsp      11:02 ♥  forsp examples\fibonacci-imperative.fp
+1
+1
+2
+3
+5
+8
+13
+21
+34
+
+   …\code\third_party\forsp      11:02 ♥  forsp examples\forsp.fp
+120
+
+   …\code\third_party\forsp      11:03 ♥  forsp examples\higher-order-functions.fp
+54
+
+   …\code\third_party\forsp      11:03 ♥  forsp examples\low-level.fp
+true
+t
+
+   …\code\third_party\forsp      11:03 ♥  forsp examples\tutorial.fp
+()
+(5)
+(3 4 5)
+3
+(4 5)
+20
+()
+()
+(5)
+25
+(CLOSURE<(quote x pop quote x push quote x push *), 000001CA04F36FE0>)
+(36)
+((abc (1 foo) ()) (1 2 3) something 36)
+(other (abc (1 foo) ()) (1 2 3) something 36)
+49
+(7 8 9)
+(8 7 9)
+(7 8 7 9)
+(8 7 9)
+(9 8 7)
+9
+64
+4
+5
+false
+true
+0
+1
+2
+3
+
+   …\code\third_party\forsp      11:03 ♥    

@@ -1,4 +1,17 @@
 *~
 \#*#
 forsp
+forsp.exe
+forsp.pdb
 *.dSYM/
+
+.zig-cache/
+zig-cache/
+zig-out/
+release/
+debug/
+build/
+build-*/
+docgen_tmp/
+
+*.code-workspace
