@@ -1,12 +1,10 @@
 
-🌅 04:57 | 🌇 21:33 | Wednesday the 12th of June | 2024-06-12 | UNIX: ~1718146864s
+>> zig cc -std=c99 -Wall -Werror -O2 -g -o forsp.exe forsp.c
 
-   …\code\third_party\forsp      11:00 ♥  zig cc -std=c99 -Wall -Werror -O2 -g -o forsp.exe forsp.c
-
-   …\code\third_party\forsp      11:02 ♥  forsp
+>> forsp
 usage: forsp <path>
 
-   …\code\third_party\forsp      11:02 ♥  forsp examples\church-numerals.fp
+>> forsp examples/church-numerals.fp
 0
 8
 17
@@ -24,12 +22,12 @@ usage: forsp <path>
 81
 64
 
-   …\code\third_party\forsp      11:02 ♥  forsp examples\currying.fp
+>> forsp examples/currying.fp
 9
 9
 9
 
-   …\code\third_party\forsp      11:02 ♥  forsp examples\demo.fp
+>> forsp examples/demo.fp
 range
 (0 1 2 3 4)
 map
@@ -76,10 +74,10 @@ reverse
 (4 5)
 17
 
-   …\code\third_party\forsp      11:02 ♥  forsp examples\factorial.fp
+>> forsp examples/factorial.fp
 120
 
-   …\code\third_party\forsp      11:02 ♥  forsp examples\fibonacci-functional.fp
+>> forsp examples/fibonacci-functional.fp
 1
 1
 2
@@ -90,7 +88,7 @@ reverse
 21
 34
 
-   …\code\third_party\forsp      11:02 ♥  forsp examples\fibonacci-imperative.fp
+>> forsp examples/fibonacci-imperative.fp
 1
 1
 2
@@ -101,17 +99,17 @@ reverse
 21
 34
 
-   …\code\third_party\forsp      11:02 ♥  forsp examples\forsp.fp
+>> forsp examples/forsp.fp
 120
 
-   …\code\third_party\forsp      11:03 ♥  forsp examples\higher-order-functions.fp
+>> forsp examples/higher-order-functions.fp
 54
 
-   …\code\third_party\forsp      11:03 ♥  forsp examples\low-level.fp
+>> forsp examples/low-level.fp
 true
 t
 
-   …\code\third_party\forsp      11:03 ♥  forsp examples\tutorial.fp
+>> forsp examples/tutorial.fp
 ()
 (5)
 (3 4 5)
@@ -142,5 +140,3 @@ true
 1
 2
 3
-
-   …\code\third_party\forsp      11:03 ♥    
