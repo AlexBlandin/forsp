@@ -1,17 +1,559 @@
+
+# ============================================================
+# Project-specific rules (add your rules here)
+# ============================================================
 *~
 \#*#
 forsp
 forsp.exe
 forsp.pdb
 *.dSYM/
-
-.zig-cache/
-zig-cache/
-zig-out/
-release/
-debug/
 build/
 build-*/
 docgen_tmp/
 
+# === BEGIN Languages ===
+
+# === BEGIN Zig ===
+# zig build
+.zig-cache/
+zig-cache/
+zig-out/
+
+# zig pkg (0.16+)
+zig-pkg/
+
+# Build artifacts
+build/
+build-*/
+release/
+debug/
+docgen_tmp/
+# === END Zig ===
+
+# === BEGIN Rust ===
+# Cargo
+debug/
+target/
+
+# rustfmt backups
+**/*.rs.bk
+
+# MSVC debug info
+*.pdb
+
+# cargo-mutants
+**/mutants.out*/
+
+# Cargo.lock (remove this line for binary projects)
+Cargo.lock
+# === END Rust ===
+
+# === BEGIN Python ===
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[codz]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+/lib/
+/lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Requirements (generated -- track pyproject.toml instead)
+requirements.txt
+requirements-*.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+nosetests.xml
+coverage.xml
+*.cover
+*.py.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+cover/
+
+# Translations
+*.mo
+*.pot
+
+# Django
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+
+# Flask
+instance/
+.webassets-cache
+
+# Scrapy
+.scrapy
+
+# Sphinx documentation
+docs/_build/
+
+# PyBuilder
+.pybuilder/
+target/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IPython
+profile_default/
+ipython_config.py
+
+# pyenv
+.python-version
+
+# pipenv
+Pipfile.lock
+
+# UV
+uv.lock
+
+# poetry
+poetry.lock
+poetry.toml
+
+# pdm
+pdm.lock
+.pdm.toml
+pdm.toml
+.pdm-python
+.pdm-build/
+
+# pixi
+.pixi
+
+# PEP 582
+__pypackages__/
+
+# Celery
+celerybeat-schedule
+celerybeat.pid
+
+# Redis
+*.rdb
+*.aof
+
+# RabbitMQ
+mnesia/
+rabbitmq/
+rabbitmq-data/
+
+# ActiveMQ
+activemq-data/
+
+# SageMath parsed files
+*.sage.py
+
+# Virtual environments
+.envrc
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Spyder project settings
+.spyderproject
+.spyproject
+
+# Rope project settings
+.ropeproject
+
+# mkdocs documentation
+/site
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre type checker
+.pyre/
+
+# pytype static type analyzer
+.pytype/
+
+# Cython debug symbols
+cython_debug/
+
+# Abstra
+.abstra/
+
+# Ruff
+.ruff_cache/
+
+# PyPI configuration file
+.pypirc
+
+# Marimo
+marimo/_static/
+marimo/_lsp/
+__marimo__/
+
+# Streamlit
+.streamlit/secrets.toml
+# === END Python ===
+
+# === BEGIN TypeScript/JavaScript ===
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+.pnpm-debug.log*
+
+# Diagnostic reports
+report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
+
+# Runtime data
+pids
+*.pid
+*.seed
+*.pid.lock
+
+# Coverage
+lib-cov
+coverage
+*.lcov
+.nyc_output
+
+# Grunt
+.grunt
+
+# Bower
+bower_components
+
+# node-waf configuration
+.lock-wscript
+
+# Compiled binary addons
+build/Release
+
+# Dependency directories
+node_modules/
+jspm_packages/
+
+# Snowpack
+web_modules/
+
+# TypeScript cache
+*.tsbuildinfo
+
+# npm cache
+.npm
+
+# eslint cache
+.eslintcache
+
+# stylelint cache
+.stylelintcache
+
+# REPL history
+.node_repl_history
+
+# Output of 'npm pack'
+*.tgz
+
+# Yarn
+.yarn-integrity
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/sdks
+!.yarn/versions
+
+# pnpm
+.pnpm-store
+
+# Bun
+bun.lock
+
+# dotenv environment variable files
+.env
+.env.*
+!.env.example
+
+# parcel-bundler cache
+.cache
+.parcel-cache
+
+# Next.js
+.next
+out
+
+# Nuxt.js / Nitro
+.nuxt
+.nitro
+dist
+.output
+
+# Gatsby
+.cache/
+
+# VuePress
+.vuepress/dist
+.temp
+
+# VitePress
+**/.vitepress/dist
+**/.vitepress/cache
+
+# SvelteKit
+.svelte-kit/
+
+# Astro
+.astro
+.data
+
+# Docusaurus
+.docusaurus
+
+# Serverless
+.serverless/
+
+# FuseBox cache
+.fusebox/
+
+# DynamoDB Local files
+.dynamodb/
+
+# Firebase
+.firebase/
+
+# TernJS port file
+.tern-port
+
+# VS Code extension testing
+.vscode-test
+
+# Vite
+vite.config.js.timestamp-*
+vite.config.ts.timestamp-*
+.vite/
+
+# Serverless Webpack
+.webpack/
+
+# Microbundle cache
+.rpt2_cache/
+.rpt2_cache_cjs/
+.rts2_cache_cjs/
+.rts2_cache_es/
+.rts2_cache_umd/
+# === END TypeScript/JavaScript ===
+
+# === END Languages ===
+
+# === BEGIN Environments ===
+
+# === BEGIN Temporary Files ===
+*.tmp
+*.temp
+*.bak
+*.orig
+*.rej
+~$*
+
+# Database journals / WAL (language-agnostic)
+*.db-shm
+*.db-wal
+*.db-journal
+# === END Temporary Files ===
+
+# === BEGIN Compiled Artifacts ===
+# Cross-cutting native compilation output (supplements language-specific blocks)
+
+# Prerequisites
+*.d
+
+# Object files
+*.o
+*.ko
+*.obj
+*.elf
+
+# Linker output
+*.ilk
+*.map
+*.exp
+
+# Precompiled headers
+*.gch
+*.pch
+
+# Static libraries
+*.a
+*.la
+*.lo
+*.lib
+libs/
+
+# Shared libraries (versioned)
+*.so.*
+*.dll
+*.dylib
+
+# Executables
+*.exe
+*.out
+*.app
+*.i*86
+*.x86_64
+*.hex
+
+# Debug files
+*.dSYM/
+*.su
+*.idb
+
+# Kernel module compile results
+*.mod*
+*.cmd
+.tmp_versions/
+modules.order
+Module.symvers
+Mkfile.old
+dkms.conf
+# === END Compiled Artifacts ===
+
+# === BEGIN Editors ===
+# VS Code
 *.code-workspace
+.vscode/
+
+# Cursor
+.cursorignore
+.cursorindexingignore
+
+# JetBrains (IntelliJ, PyCharm, RustRover, WebStorm, etc.)
+.idea/
+.fleet
+
+# Visual Studio
+*.user
+*.aps
+.vs
+[Dd]ebug.DLL/
+[Rr]elease.DLL/
+# === END Editors ===
+
+# === BEGIN Tools ===
+# Claude Code
+.claude
+.worktrees/
+
+# Scratch files
+.scratch/
+
+# AI coding tools
+.continue/
+.aider*
+.codeium/
+.tabnine/
+.copilot/
+.windsurf/
+.bolt/
+.sourcegraph/
+
+# Task tracking
+*.2do
+
+# Copy-paste detection
+.jscpd-report/
+
+# Playwright
+test-results/
+playwright-report/
+# === END Tools ===
+
+# === BEGIN Linux ===
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+.nfs*
+nohup.out
+# === END Linux ===
+
+# === BEGIN Windows ===
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+*.stackdump
+[Dd]esktop.ini
+$RECYCLE.BIN/
+*.cab
+*.msi
+*.msix
+*.msm
+*.msp
+*.lnk
+# === END Windows ===
+
+# === BEGIN macOS ===
+.DS_Store
+.localized
+__MACOSX/
+.AppleDouble
+.LSOverride
+._*
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+.AppleDB
+.AppleDesktop
+.apdisk
+# === END macOS ===
+
+# === END Environments ===
+
+# ============================================================
+# Auto-appended rules (tools may add rules below this line)
+# Move these to the project-specific section at the top when convenient.
+# ============================================================
