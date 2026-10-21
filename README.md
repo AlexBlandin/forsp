@@ -109,3 +109,18 @@ Examples:
 ./forsp examples/fibonacci-functional.fp
 ./forsp examples/forsp.fp
 ```
+
+## Zig Port
+
+`src/forsp.zig` is a port of `forsp.c` to Zig 0.17, including `DEBUG` (as `-Dtrace=true`) and `USE_LOWLEVEL` (as `-Dlowlevel=true`).
+
+```
+zig build -Doptimize=ReleaseFast       # builds the zig-out/bin/forsp binary
+zig build run -- examples/tutorial.fp  # builds and runs a program
+zig build test                         # builds and runs tests
+```
+
+A few fixes were added:
+
+- Popping an empty stack reports `Value Stack Underflow`
+- Explicitly wraps (for arithmetic) or saturates (0/-1 for shifts) on overflow

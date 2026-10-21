@@ -1,71 +1,40 @@
+//! Command-line entry point: `forsp <path>` runs the program in that file.
+
 const std = @import("std");
 const Io = std.Io;
-
 const forsp = @import("forsp");
 
-pub fn main(init: std.process.Init) !void {
-    // Prints to stderr, unbuffered, ignoring potential errors.
-    std.debug.print("All your {s} are belong to us.\n", .{"codebase"});
-
-    // This is appropriate for anything that lives as long as the process.
-    const arena: std.mem.Allocator = init.arena.allocator();
-
-    // Accessing command line arguments:
-    const args = try init.minimal.args.toSlice(arena);
-    for (args) |arg| {
-        std.log.info("arg: {s}", .{arg});
-    }
-
-    // In order to do I/O operations need an `Io` instance.
+pub fn main(init: std.process.Init) !u8 {
     const io = init.io;
+    const arena = init.arena.allocator();
 
-    // Stdout is for the actual output of your application, for example if you
-    // are implementing gzip, then only the compressed bytes should be sent to
-    // stdout, not any debugging messages.
-    var stdout_buffer: [1024]u8 = undefined;
-    var stdout_file_writer: Io.File.Writer = .init(.stdout(), io, &stdout_buffer);
-    const stdout_writer = &stdout_file_writer.interface;
+    var stderr_buffer: [256]u8 = undefined;
+    var stderr_writer: Io.File.Writer = .initStreaming(.stderr(), io, &stderr_buffer);
+    const stderr = &stderr_writer.interface;
+    defer stderr.flush() catch {};
 
-    try forsp.printAnotherMessage(stdout_writer);
+    const args = try init.minimal.args.toSlice(arena);
+    if (args.len != 2) {
+        try stderr.print("usage: {s} <path>\n", .{if (args.len > 0) args[0] else "forsp"});
+        return 1;
+    }
+    const path = args[1];
 
-    try stdout_writer.flush(); // Don't forget to flush!
-}
-
-test "simple test" {
-    const gpa = std.testing.allocator;
-    var list: std.ArrayList(i32) = .empty;
-    defer list.deinit(gpa); // Try commenting this out and see if zig detects the memory leak!
-    try list.append(gpa, 42);
-    try std.testing.expectEqual(@as(i32, 42), list.pop());
-}
-
-test "fuzz example" {
-    try std.testing.fuzz({}, testOne, .{});
-}
-
-fn testOne(context: void, smith: *std.testing.Smith) !void {
-    _ = context;
-    // Try command `zig build test --fuzz -Doptimize=ReleaseFast` to see if it manages to fail this test case!
-
-    const gpa = std.testing.allocator;
-    var list: std.ArrayList(u8) = .empty;
-    defer list.deinit(gpa);
-    while (!smith.eos()) switch (smith.value(enum { add_data, dup_data })) {
-        .add_data => {
-            const slice = try list.addManyAsSlice(gpa, smith.value(u4));
-            smith.bytes(slice);
-        },
-        .dup_data => {
-            if (list.items.len == 0) continue;
-            if (list.items.len > std.math.maxInt(u32)) return error.SkipZigTest;
-            const len = smith.valueRangeAtMost(u32, 1, @min(32, list.items.len));
-            const off = smith.valueRangeAtMost(u32, 0, @intCast(list.items.len - len));
-            try list.appendSlice(gpa, list.items[off..][0..len]);
-            try std.testing.expectEqualSlices(
-                u8,
-                list.items[off..][0..len],
-                list.items[list.items.len - len ..],
-            );
-        },
+    const input = Io.Dir.cwd().readFileAlloc(io, path, arena, .unlimited) catch |err| {
+        try stderr.print("FAIL: Failed to open file: '{s}' ({t})\n", .{ path, err });
+        return 1;
     };
+
+    var stdout_buffer: [4096]u8 = undefined;
+    var stdout_writer: Io.File.Writer = .initStreaming(.stdout(), io, &stdout_buffer);
+    const stdout = &stdout_writer.interface;
+
+    var interp: forsp.Interp = try .init(arena, input, stdout);
+    interp.run() catch |err| {
+        stdout.flush() catch {};
+        try interp.writeFailure(err, stderr);
+        return 1;
+    };
+    try stdout.flush();
+    return 0;
 }

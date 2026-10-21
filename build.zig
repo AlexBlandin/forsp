@@ -1,5 +1,19 @@
 const std = @import("std");
 
+/// Examples for testing, with corresponding `tests/expected/<name>.out`.
+const examples = [_][]const u8{
+    "church-numerals",
+    "currying",
+    "demo",
+    "factorial",
+    "fibonacci-functional",
+    "fibonacci-imperative",
+    "forsp",
+    "higher-order-functions",
+    "low-level",
+    "tutorial",
+};
+
 // Although this function looks imperative, it does not perform the build
 // directly and instead it mutates the build graph (`b`) that will be then
 // executed by an external runner. The functions in `std.Build` implement a DSL
@@ -20,6 +34,12 @@ pub fn build(b: *std.Build) void {
     // of this build script using `b.option()`. All defined flags (including
     // target and optimize options) will be listed when running `zig build --help`
     // in this directory.
+    
+    // Mirror the C interpreter's DEBUG and USE_LOWLEVEL parameters.
+    const options = b.addOptions();
+    const trace = b.option(bool, "trace", "Print every compute/eval step (C: DEBUG)") orelse false;
+    options.addOption(bool, "trace", trace);
+    options.addOption(bool, "lowlevel", b.option(bool, "lowlevel", "Define the ptr-*! primitives (C: USE_LOWLEVEL)") orelse true);
 
     // This creates a module, which represents a collection of source files alongside
     // some compilation options, such as optimization mode and linked system libraries.
@@ -28,18 +48,20 @@ pub fn build(b: *std.Build) void {
     // to our consumers. We must give it a name because a Zig package can expose
     // multiple modules and consumers will need to be able to specify which
     // module they want to access.
-    const mod = b.addModule("forsp", .{
+    const forsp = b.addModule("forsp", .{
         // The root source file is the "entry point" of this module. Users of
         // this module will only be able to access public declarations contained
         // in this file, which means that if you have declarations that you
         // intend to expose to consumers that were defined in other files part
         // of this module, you will have to make sure to re-export them from
         // the root file.
-        .root_source_file = b.path("src/root.zig"),
+        .root_source_file = b.path("src/forsp.zig"),
         // Later on we'll use this module as the root module of a test executable
         // which requires us to specify a target.
         .target = target,
+        .optimize = optimize,
     });
+    forsp.addOptions("config", options);
 
     // Here we define an executable. An executable needs to have a root module
     // which needs to expose a `main` function. While we could add a main function
@@ -78,7 +100,7 @@ pub fn build(b: *std.Build) void {
                 // repeated because you are allowed to rename your imports, which
                 // can be extremely useful in case of collisions (which can happen
                 // importing modules from different packages).
-                .{ .name = "forsp", .module = mod },
+                .{ .name = "forsp", .module = forsp },
             },
         }),
     });
@@ -94,7 +116,7 @@ pub fn build(b: *std.Build) void {
     // This will evaluate the `run` step rather than the default step.
     // For a top level step to actually do something, it must depend on other
     // steps (e.g. a Run step, as we will see in a moment).
-    const run_step = b.step("run", "Run the app");
+    const run_step = b.step("run", "Run the interpreter: zig build run -- <path>");
 
     // This creates a RunArtifact step in the build graph. A RunArtifact step
     // invokes an executable compiled by Zig. Steps will only be executed by the
@@ -116,29 +138,52 @@ pub fn build(b: *std.Build) void {
     // Creates an executable that will run `test` blocks from the provided module.
     // Here `mod` needs to define a target, which is why earlier we made sure to
     // set the releative field.
-    const mod_tests = b.addTest(.{
-        .root_module = mod,
+    const test_mod = b.createModule(.{
+        .root_source_file = b.path("src/forsp.zig"),
+        .target = target,
+        .optimize = optimize,
     });
-
-    // A run step that will run the test executable.
-    const run_mod_tests = b.addRunArtifact(mod_tests);
-
-    // Creates an executable that will run `test` blocks from the executable's
-    // root module. Note that test executables only test one module at a time,
-    // hence why we have to create two separate ones.
-    const exe_tests = b.addTest(.{
-        .root_module = exe.root_module,
-    });
-
-    // A run step that will run the second test executable.
-    const run_exe_tests = b.addRunArtifact(exe_tests);
+    test_mod.addOptions("config", options);
+    inline for (examples) |name| {
+        test_mod.addAnonymousImport("example/" ++ name, .{ .root_source_file = b.path("examples/" ++ name ++ ".fp") });
+        test_mod.addAnonymousImport("expected/" ++ name, .{ .root_source_file = b.path("tests/expected/" ++ name ++ ".out") });
+    }
+    test_mod.addImport("examples", b.createModule(.{
+        .root_source_file = b.addWriteFiles().add("examples.zig", examples_source),
+    }));
 
     // A top level step for running all tests. dependOn can be called multiple
     // times and since the two run steps do not depend on one another, this will
     // make the two of them run in parallel.
+    const tests = b.addTest(.{ .root_module = test_mod });
     const test_step = b.step("test", "Run tests");
-    test_step.dependOn(&run_mod_tests.step);
-    test_step.dependOn(&run_exe_tests.step);
+    test_step.dependOn(&b.addRunArtifact(tests).step);
+    
+    // End-to-end checks of the executable's arguments, output and exit codes.
+    const cli_ok = b.addRunArtifact(exe);
+    cli_ok.addFileArg(b.path("examples/factorial.fp"));
+    if (!trace) cli_ok.expectStdOutEqual("120\n"); // trace lines share stdout
+    cli_ok.expectExitCode(0);
+    test_step.dependOn(&cli_ok.step);
+
+    const cli_usage = b.addRunArtifact(exe);
+    cli_usage.expectStdErrMatch("usage: ");
+    cli_usage.expectExitCode(1);
+    test_step.dependOn(&cli_usage.step);
+
+    const cli_missing = b.addRunArtifact(exe);
+    cli_missing.addArg("tests/cli/does-not-exist.fp");
+    cli_missing.expectStdErrMatch("FAIL: Failed to open file: 'tests/cli/does-not-exist.fp'");
+    cli_missing.expectExitCode(1);
+    test_step.dependOn(&cli_missing.step);
+
+    // Output printed before a failure is still flushed.
+    const cli_fail = b.addRunArtifact(exe);
+    cli_fail.addFileArg(b.path("tests/cli/unbound.fp"));
+    if (!trace) cli_fail.expectStdOutEqual("2\n");
+    cli_fail.expectStdErrEqual("FAIL: Failed to find in key='nope' in environment\n");
+    cli_fail.expectExitCode(1);
+    test_step.dependOn(&cli_fail.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.
     //
@@ -152,3 +197,10 @@ pub fn build(b: *std.Build) void {
     // Lastly, the Zig build system is relatively simple and self-contained,
     // and reading its source code will allow you to master it.
 }
+
+/// The example names as Zig source, so the tests share one list with the build.
+const examples_source = blk: {
+    var src: []const u8 = "pub const names = [_][]const u8{";
+    for (examples) |name| src = src ++ "\"" ++ name ++ "\",";
+    break :blk src ++ "};\n";
+};

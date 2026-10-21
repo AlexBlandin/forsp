@@ -2,15 +2,8 @@
 # ============================================================
 # Project-specific rules (add your rules here)
 # ============================================================
-*~
 \#*#
 forsp
-forsp.exe
-forsp.pdb
-*.dSYM/
-build/
-build-*/
-docgen_tmp/
 
 # === BEGIN Languages ===
 
@@ -557,3 +550,5 @@ __MACOSX/
 # Auto-appended rules (tools may add rules below this line)
 # Move these to the project-specific section at the top when convenient.
 # ============================================================
+
+!tests/expected/*.out
