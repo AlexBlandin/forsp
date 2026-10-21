@@ -37,6 +37,10 @@ pub const Error = error{
     StackUnderflow,
     QuoteWithoutData,
     EndOfInput,
+    UnclosedList,
+    RecursionTooDeep,
+    /// A host primitive called `Interp.fail`.
+    PrimitiveFailed,
 } || Allocator.Error || Writer.Error;
 
 /// Object kinds. The numbers are observable through the `tag` primitive.
@@ -83,13 +87,16 @@ comptime {
     assert(@offsetOf(State, "atom_true") == 6 * 8);
 }
 
-const Primitive = struct {
+/// A primitive gets the interpreter and the environment of the code calling
+/// it, which it may replace (as `pop` does to bind a name). It must not call
+/// `run` or `evalBody`, which reset the frames of the program calling it.
+pub const Primitive = struct {
     name: []const u8,
-    func: *const fn (self: *Interp, env: **Object) Error!void,
+    func: *const fn (interp: *Interp, env: **Object) Error!void,
 };
 
 /// All primitives from forsp.c.
-const primitives = [_]Primitive{
+const builtins = [_]Primitive{
     // Core primitives
     .{ .name = "push", .func = primPush },
     .{ .name = "pop", .func = primPop },
@@ -117,16 +124,41 @@ const primitives = [_]Primitive{
     .{ .name = "ptr-from-obj!", .func = primPtrFromObj },
 } else [_]Primitive{};
 
+pub const Options = struct {
+    /// Print every compute and eval step to the output, as forsp.c's DEBUG does.
+    trace: bool = false,
+    /// Most closure calls in progress at once; deeper recursion fails with
+    /// `error.RecursionTooDeep`. Tail calls replace their caller, so they do
+    /// not add to the depth.
+    max_depth: usize = 1 << 20,
+    /// Defined after the built-in primitives, so a host primitive with a
+    /// built-in name shadows it.
+    primitives: []const Primitive = &.{},
+};
+
 /// One interpreter over one input text. Objects are never freed (there is no
 /// garbage collector), so `gpa` is normally an arena.
 pub const Interp = struct {
     state: State,
     gpa: Allocator,
     out: *Writer,
+    options: Options,
+    /// The built-in primitives followed by `options.primitives`.
+    primitives: []const Primitive,
+    /// Closure calls in progress, innermost last. Left as they were when
+    /// `run` fails.
+    frames: std.ArrayList(Frame) = .empty,
+    open_lists: std.ArrayList(OpenList) = .empty,
+    print_tasks: std.ArrayList(PrintTask) = .empty,
+    /// Every atom by its name when interned. A program that rewrites
+    /// `interned_atoms`, or an atom's name, through ptr-write! does not change it.
+    atom_index: std.StringHashMapUnmanaged(*Object) = .empty,
     /// The key of the failed lookup behind the last `error.UnboundAtom`.
     unbound: ?*Object = null,
+    /// The message behind the last `error.PrimitiveFailed`.
+    failure_message: []const u8 = "",
 
-    pub fn init(gpa: Allocator, input: []const u8, out: *Writer) Error!Interp {
+    pub fn init(gpa: Allocator, input: []const u8, out: *Writer, options: Options) Error!Interp {
         const nil = try gpa.create(Object);
         nil.* = .{ .tag = .nil, .as = undefined };
         var self: Interp = .{
@@ -146,6 +178,11 @@ pub const Interp = struct {
             },
             .gpa = gpa,
             .out = out,
+            .options = options,
+            .primitives = if (options.primitives.len == 0)
+                &builtins
+            else
+                try std.mem.concat(gpa, Primitive, &.{ &builtins, options.primitives }),
         };
         self.state.atom_true = try self.intern("t");
         self.state.atom_quote = try self.intern("quote");
@@ -153,7 +190,7 @@ pub const Interp = struct {
         self.state.atom_pop = try self.intern("pop");
 
         var env = nil;
-        for (primitives, 0..) |primitive, index| {
+        for (self.primitives, 0..) |primitive, index| {
             const prim = try self.make(.{ .tag = .prim, .as = .{ .prim = index } });
             env = try self.envDefine(env, try self.intern(primitive.name), prim);
         }
@@ -163,11 +200,52 @@ pub const Interp = struct {
 
     /// Reads the program (the first expression of the input) and computes it.
     pub fn run(self: *Interp) Error!void {
+        self.frames.clearRetainingCapacity();
         const program = try self.read();
-        try self.compute(program, self.state.env);
+        _ = try self.compute(program, self.state.env);
     }
 
-    /// Writes the diagnostic for an error returned by `run`.
+    /// Reads every form in `input` and computes them as one body in the
+    /// top-level environment, so definitions and the value stack carry over
+    /// to the next call. The whole input is read first, so the `read`
+    /// primitive sees the end of input. `input` must outlive the call.
+    pub fn evalBody(self: *Interp, input: []const u8) Error!void {
+        self.state.input_str = input.ptr;
+        self.state.input_len = std.mem.indexOfScalar(u8, input, 0) orelse input.len;
+        self.state.input_pos = 0;
+        self.state.read_stack = self.state.nil;
+        self.frames.clearRetainingCapacity();
+
+        var body = self.state.nil;
+        var last: ?*Object = null;
+        while (true) {
+            self.skipWhitespaceAndComments();
+            if (self.peek() == 0 and self.state.read_stack == self.state.nil) break;
+            const stray_paren = self.peek() == ')' and self.state.read_stack == self.state.nil;
+            const cell = try self.makePair(try self.read(), self.state.nil);
+            // A top-level ) reads as the empty atom, as in file mode, but read
+            // leaves it in the input; step past it so the loop ends.
+            if (stray_paren) self.advance();
+            if (last) |l| l.as.pair.cdr = cell else body = cell;
+            last = cell;
+        }
+        self.state.env = self.compute(body, self.state.env) catch |err| {
+            // Keep the definitions made before the failure, as the value
+            // stack keeps its changes. The body's frame is the first one.
+            if (self.frames.items.len > 0) self.state.env = self.frames.items[0].env;
+            return err;
+        };
+    }
+
+    /// Fails the running program with `message`, which must outlive the
+    /// interpreter. For host primitives: `return interp.fail("...")`.
+    pub fn fail(self: *Interp, message: []const u8) Error {
+        self.failure_message = message;
+        return error.PrimitiveFailed;
+    }
+
+    /// Writes the diagnostic for an error returned by `run` or `evalBody`:
+    /// forsp.c's message on the first line, then any detail on further lines.
     pub fn writeFailure(self: *const Interp, err: Error, w: *Writer) Writer.Error!void {
         try w.writeAll("FAIL: ");
         switch (err) {
@@ -175,17 +253,50 @@ pub const Interp = struct {
             error.CdrOfNonPair => try w.writeAll("Expected pair to apply cdr() function"),
             error.UnboundAtom => {
                 const key = if (self.unbound) |k| std.mem.span(k.as.atom) else "";
-                // "find in key" is forsp.c's wording, kept for identical diagnostics.
                 try w.print("Failed to find in key='{s}' in environment", .{key});
             },
             error.KeyNotAtom => try w.writeAll("Expected 'key' to be an atom in env_find()"),
             error.StackUnderflow => try w.writeAll("Value Stack Underflow"),
             error.QuoteWithoutData => try w.writeAll("Expected data following a quote form"),
-            error.EndOfInput => try w.writeAll("End of input: could not read()"),
+            error.EndOfInput, error.UnclosedList => try w.writeAll("End of input: could not read()"),
             error.OutOfMemory => try w.writeAll("Out of memory"),
             error.WriteFailed => try w.writeAll("Failed to write output"),
+            error.RecursionTooDeep => try w.writeAll("Recursion too deep"),
+            error.PrimitiveFailed => try w.writeAll(self.failure_message),
         }
         try w.writeByte('\n');
+
+        if (err == error.UnclosedList) {
+            const list = self.open_lists.items[self.open_lists.items.len - 1];
+            const at = self.lineAndColumn(list.pos);
+            try w.print("  unclosed '(' at line {d}, column {d}\n", .{ at.line, at.column });
+        }
+        try self.writeCallChain(w);
+    }
+
+    /// Names the closures being run when a program failed, innermost first.
+    fn writeCallChain(self: *const Interp, w: *Writer) Writer.Error!void {
+        const shown_max = 10;
+        var named: usize = 0;
+        var i = self.frames.items.len;
+        while (i > 0) {
+            i -= 1;
+            const name = self.frames.items[i].name orelse continue;
+            if (named < shown_max) {
+                try w.writeAll(if (named == 0) "  in: " else " <- ");
+                try w.writeAll(std.mem.span(name.as.atom));
+            }
+            named += 1;
+        }
+        if (named > shown_max) try w.print(" <- ... ({d} more)", .{named - shown_max});
+        if (named > 0) try w.writeByte('\n');
+    }
+
+    /// 1-based line and byte column of input position `pos`.
+    fn lineAndColumn(self: *const Interp, pos: usize) struct { line: usize, column: usize } {
+        const before = self.state.input_str[0..@min(pos, self.state.input_len)];
+        const line_start = if (std.mem.lastIndexOfScalar(u8, before, '\n')) |nl| nl + 1 else 0;
+        return .{ .line = std.mem.countScalar(u8, before, '\n') + 1, .column = before.len - line_start + 1 };
     }
 
     fn make(self: *Interp, obj: Object) Allocator.Error!*Object {
@@ -194,11 +305,11 @@ pub const Interp = struct {
         return ptr;
     }
 
-    fn makeNum(self: *Interp, num: i64) Allocator.Error!*Object {
+    pub fn makeNum(self: *Interp, num: i64) Allocator.Error!*Object {
         return self.make(.{ .tag = .num, .as = .{ .num = num } });
     }
 
-    fn makePair(self: *Interp, car_: *Object, cdr_: *Object) Allocator.Error!*Object {
+    pub fn makePair(self: *Interp, car_: *Object, cdr_: *Object) Allocator.Error!*Object {
         return self.make(.{ .tag = .pair, .as = .{ .pair = .{ .car = car_, .cdr = cdr_ } } });
     }
 
@@ -206,24 +317,22 @@ pub const Interp = struct {
         return self.make(.{ .tag = .clos, .as = .{ .clos = .{ .body = body, .env = env } } });
     }
 
-    fn intern(self: *Interp, name: []const u8) Error!*Object {
-        var list = self.state.interned_atoms;
-        while (list != self.state.nil) : (list = try cdr(list)) {
-            const atom = try car(list);
-            assert(atom.tag == .atom);
-            if (std.mem.eql(u8, std.mem.span(atom.as.atom), name)) return atom;
-        }
+    /// Returns the atom named `name`, creating it on first use. New atoms go
+    /// on `state.interned_atoms` and in `atom_index` for lookup.
+    pub fn intern(self: *Interp, name: []const u8) Error!*Object {
+        if (self.atom_index.get(name)) |atom| return atom;
         const atom = try self.make(.{ .tag = .atom, .as = .{ .atom = try self.gpa.dupeSentinel(u8, name, 0) } });
         self.state.interned_atoms = try self.makePair(atom, self.state.interned_atoms);
+        try self.atom_index.put(self.gpa, std.mem.span(atom.as.atom), atom);
         return atom;
     }
 
-    fn car(obj: *Object) Error!*Object {
+    pub fn car(obj: *Object) Error!*Object {
         if (obj.tag != .pair) return error.CarOfNonPair;
         return obj.as.pair.car;
     }
 
-    fn cdr(obj: *Object) Error!*Object {
+    pub fn cdr(obj: *Object) Error!*Object {
         if (obj.tag != .pair) return error.CdrOfNonPair;
         return obj.as.pair.cdr;
     }
@@ -248,7 +357,7 @@ pub const Interp = struct {
         self.state.input_pos += 1;
     }
 
-    fn isWhite(c: u8) bool {
+    fn isWhitespace(c: u8) bool {
         return c == ' ' or c == '\t' or c == '\n';
     }
 
@@ -257,13 +366,13 @@ pub const Interp = struct {
     }
 
     fn isPunctuation(c: u8) bool {
-        return c == 0 or isWhite(c) or isDirective(c) or c == '(' or c == ')' or c == ';';
+        return c == 0 or isWhitespace(c) or isDirective(c) or c == '(' or c == ')' or c == ';';
     }
 
-    fn skipWhiteAndComments(self: *Interp) void {
+    fn skipWhitespaceAndComments(self: *Interp) void {
         while (true) {
             const c = self.peek();
-            if (isWhite(c)) {
+            if (isWhitespace(c)) {
                 self.advance();
             } else if (c == ';') {
                 while (self.peek() != 0) {
@@ -275,17 +384,38 @@ pub const Interp = struct {
         }
     }
 
+    /// Reads one object. Nested lists are kept on `open_lists` rather than
+    /// the native stack, so nesting depth is limited only by memory.
     fn read(self: *Interp) Error!*Object {
+        self.open_lists.clearRetainingCapacity();
+        while (true) {
+            // Queued objects from ^ or $ always belong to the current list.
+            if (self.open_lists.items.len > 0 and self.state.read_stack == self.state.nil) {
+                self.skipWhitespaceAndComments();
+                if (self.peek() == ')') {
+                    self.advance();
+                    const list = self.open_lists.pop().?;
+                    if (try self.addToList(list.head)) |obj| return obj;
+                    continue;
+                }
+            }
+            const obj = try self.readItem() orelse continue; // a list was opened
+            if (try self.addToList(obj)) |done| return done;
+        }
+    }
+
+    /// Reads an atom, number or directive, or opens a list and returns null.
+    fn readItem(self: *Interp) Error!?*Object {
         const queued = self.state.read_stack;
         if (queued != self.state.nil) {
             self.state.read_stack = try cdr(queued);
-            return car(queued);
+            return try car(queued);
         }
 
-        self.skipWhiteAndComments();
+        self.skipWhitespaceAndComments();
         const c = self.peek();
         switch (c) {
-            0 => return error.EndOfInput,
+            0 => return if (self.open_lists.items.len > 0) error.UnclosedList else error.EndOfInput,
             '\'' => {
                 self.advance();
                 return self.state.atom_quote;
@@ -299,30 +429,21 @@ pub const Interp = struct {
                 return self.state.atom_quote;
             },
             '(' => {
+                try self.open_lists.append(self.gpa, .{ .head = self.state.nil, .tail = null, .pos = self.state.input_pos });
                 self.advance();
-                return self.readList();
+                return null;
             },
-            else => return self.readScalar(),
+            else => return try self.readScalar(),
         }
     }
 
-    fn readList(self: *Interp) Error!*Object {
-        const nil = self.state.nil;
-        var head = nil;
-        var tail: ?*Object = null;
-        while (true) {
-            // Queued objects from ^ or $ always belong to this list.
-            if (self.state.read_stack == nil) {
-                self.skipWhiteAndComments();
-                if (self.peek() == ')') {
-                    self.advance();
-                    return head;
-                }
-            }
-            const cell = try self.makePair(try self.read(), nil);
-            if (tail) |last| last.as.pair.cdr = cell else head = cell;
-            tail = cell;
-        }
+    /// Appends `obj` to the innermost open list, or returns it when no list is open.
+    fn addToList(self: *Interp, obj: *Object) Error!?*Object {
+        const list = if (self.open_lists.items.len > 0) &self.open_lists.items[self.open_lists.items.len - 1] else return obj;
+        const cell = try self.makePair(obj, self.state.nil);
+        if (list.tail) |last| last.as.pair.cdr = cell else list.head = cell;
+        list.tail = cell;
+        return null;
     }
 
     fn readScalar(self: *Interp) Error!*Object {
@@ -354,43 +475,60 @@ pub const Interp = struct {
         return n;
     }
 
-    fn print(self: *Interp, obj: *Object) Writer.Error!void {
-        try self.printRecurse(obj);
+    fn print(self: *Interp, obj: *Object) Error!void {
+        try self.printObject(obj);
         try self.out.writeByte('\n');
     }
 
-    fn printRecurse(self: *Interp, obj: *Object) Writer.Error!void {
+    /// Prints `obj`, with pending work on `print_tasks` as a buffer.
+    fn printObject(self: *Interp, obj: *Object) Error!void {
         const w = self.out;
-        if (obj == self.state.nil) return w.writeAll("()");
-        switch (obj.tag) {
-            .atom => try w.writeAll(std.mem.span(obj.as.atom)),
-            .num => try w.print("{d}", .{obj.as.num}),
-            .pair => {
-                try w.writeByte('(');
-                try self.printRecurse(obj.as.pair.car);
-                var rest = obj.as.pair.cdr;
-                while (rest != self.state.nil) : (rest = rest.as.pair.cdr) {
-                    if (rest.tag != .pair) {
-                        try w.writeAll(" . ");
-                        try self.printRecurse(rest);
-                        break;
-                    }
-                    try w.writeByte(' ');
-                    try self.printRecurse(rest.as.pair.car);
+        const nil = self.state.nil;
+        const tasks = &self.print_tasks;
+        tasks.clearRetainingCapacity();
+        try tasks.append(self.gpa, .{ .object = obj });
+        while (tasks.pop()) |task| switch (task) {
+            .object => |o| {
+                if (o == nil) {
+                    try w.writeAll("()");
+                    continue;
                 }
-                try w.writeByte(')');
+                switch (o.tag) {
+                    .atom => try w.writeAll(std.mem.span(o.as.atom)),
+                    .num => try w.print("{d}", .{o.as.num}),
+                    .pair => {
+                        try w.writeByte('(');
+                        try tasks.append(self.gpa, .{ .rest = o.as.pair.cdr });
+                        try tasks.append(self.gpa, .{ .object = o.as.pair.car });
+                    },
+                    .clos => {
+                        try w.writeAll("CLOSURE<");
+                        try tasks.append(self.gpa, .{ .closure_env = o.as.clos.env });
+                        try tasks.append(self.gpa, .{ .object = o.as.clos.body });
+                    },
+                    .prim => try w.print("PRIM<0x{x}>", .{if (o.as.prim < self.primitives.len)
+                        @intFromPtr(self.primitives[o.as.prim].func)
+                    else
+                        o.as.prim}),
+                    .nil, _ => {},
+                }
             },
-            .clos => {
-                try w.writeAll("CLOSURE<");
-                try self.printRecurse(obj.as.clos.body);
-                try w.print(", 0x{x}>", .{@intFromPtr(obj.as.clos.env)});
+            .rest => |rest| {
+                if (rest == nil) {
+                    try w.writeByte(')');
+                } else if (rest.tag != .pair) {
+                    try w.writeAll(" . ");
+                    try tasks.append(self.gpa, .close);
+                    try tasks.append(self.gpa, .{ .object = rest });
+                } else {
+                    try w.writeByte(' ');
+                    try tasks.append(self.gpa, .{ .rest = rest.as.pair.cdr });
+                    try tasks.append(self.gpa, .{ .object = rest.as.pair.car });
+                }
             },
-            .prim => try w.print("PRIM<0x{x}>", .{if (obj.as.prim < primitives.len)
-                @intFromPtr(primitives[obj.as.prim].func)
-            else
-                obj.as.prim}),
-            .nil, _ => {},
-        }
+            .close => try w.writeByte(')'),
+            .closure_env => |env| try w.print(", 0x{x}>", .{@intFromPtr(env)}),
+        };
     }
 
     // Environment: a list of (key . value) pairs, newest first.
@@ -410,56 +548,111 @@ pub const Interp = struct {
         return self.makePair(try self.makePair(key, val), env);
     }
 
-    fn push(self: *Interp, obj: *Object) Allocator.Error!void {
+    pub fn push(self: *Interp, obj: *Object) Allocator.Error!void {
         self.state.stack = try self.makePair(obj, self.state.stack);
     }
 
-    fn pop(self: *Interp) Error!*Object {
+    pub fn pop(self: *Interp) Error!*Object {
         const stack = self.state.stack;
         if (stack == self.state.nil) return error.StackUnderflow;
         self.state.stack = try cdr(stack);
         return car(stack);
     }
 
-    fn compute(self: *Interp, comp_in: *Object, env_in: *Object) Error!void {
-        if (config.trace) {
-            try self.out.writeAll("compute: ");
-            try self.print(comp_in);
-        }
-        var comp = comp_in;
-        var env = env_in;
-        while (comp != self.state.nil) {
-            const cmd = try car(comp);
-            comp = try cdr(comp);
+    /// Runs `comp` in `env` to completion and returns the environment it
+    /// ended with. Closure calls push frames on `frames` instead of
+    /// recursing, so only memory limits how deep programs go.
+    fn compute(self: *Interp, comp: *Object, env: *Object) Error!*Object {
+        const base = self.frames.items.len;
+        try self.enter(comp, env, null);
+        while (true) {
+            const top = &self.frames.items[self.frames.items.len - 1];
+            if (top.comp == self.state.nil) {
+                const done = self.frames.pop().?;
+                if (self.frames.items.len == base) return done.env;
+                continue;
+            }
+            const cmd = try car(top.comp);
+            top.comp = try cdr(top.comp);
             if (cmd == self.state.atom_quote) {
-                if (comp == self.state.nil) return error.QuoteWithoutData;
-                try self.push(try car(comp));
-                comp = try cdr(comp);
+                if (top.comp == self.state.nil) return error.QuoteWithoutData;
+                try self.push(try car(top.comp));
+                top.comp = try cdr(top.comp);
                 continue;
             }
             // atoms and (...) get ordinary eval
-            try self.eval(cmd, &env);
+            try self.eval(cmd, base);
         }
     }
 
-    fn eval(self: *Interp, expr: *Object, env: **Object) Error!void {
-        if (config.trace) {
+    /// Starts running `comp` in `env`.
+    fn enter(self: *Interp, comp: *Object, env: *Object, name: ?*Object) Error!void {
+        if (self.options.trace) {
+            try self.out.writeAll("compute: ");
+            try self.print(comp);
+        }
+        if (self.frames.items.len >= self.options.max_depth) return error.RecursionTooDeep;
+        try self.frames.append(self.gpa, .{ .comp = comp, .env = env, .name = name });
+    }
+
+    /// Evaluates `expr` in the top frame. `base` is the frame `compute`
+    /// started, which is never replaced, so its final environment survives.
+    fn eval(self: *Interp, expr: *Object, base: usize) Error!void {
+        if (self.options.trace) {
             try self.out.writeAll("eval: ");
             try self.print(expr);
         }
+        const index = self.frames.items.len - 1;
+        const top = &self.frames.items[index];
         switch (expr.tag) {
             .atom => {
-                const val = try self.envFind(env.*, expr);
+                const val = try self.envFind(top.env, expr);
                 switch (val.tag) {
-                    .clos => try self.compute(val.as.clos.body, val.as.clos.env),
-                    .prim => try primitives[val.as.prim].func(self, env),
+                    .clos => {
+                        // A call that ends its body replaces the frame: a tail call.
+                        if (top.comp == self.state.nil and index > base) _ = self.frames.pop();
+                        try self.enter(val.as.clos.body, val.as.clos.env, expr);
+                    },
+                    .prim => {
+                        // The primitive gets a copy, as a host primitive that
+                        // re-enters the interpreter can move `frames`.
+                        var env = top.env;
+                        try self.primitives[val.as.prim].func(self, &env);
+                        self.frames.items[index].env = env;
+                    },
                     else => try self.push(val),
                 }
             },
-            .nil, .pair => try self.push(try self.makeClos(expr, env.*)),
+            .nil, .pair => try self.push(try self.makeClos(expr, top.env)),
             else => try self.push(expr),
         }
     }
+};
+
+/// A list being read.
+const OpenList = struct {
+    head: *Object,
+    tail: ?*Object,
+    /// Input position of its `(`.
+    pos: usize,
+};
+
+/// Printing still to do, innermost last.
+const PrintTask = union(enum) {
+    object: *Object,
+    /// The rest of a list after an element: more elements, a dotted tail, or `)`.
+    rest: *Object,
+    close,
+    closure_env: *Object,
+};
+
+/// A closure call in progress.
+const Frame = struct {
+    /// The commands of the body still to run.
+    comp: *Object,
+    env: *Object,
+    /// The atom the closure was called by; null for the body `compute` started.
+    name: ?*Object,
 };
 
 fn primPush(self: *Interp, env: **Object) Error!void {
@@ -603,13 +796,12 @@ fn primPtrFromObj(self: *Interp, _: **Object) Error!void {
 /// Runs `source` as a whole program and returns what it printed.
 fn runProgram(arena: Allocator, source: []const u8) ![]u8 {
     var out: Writer.Allocating = .init(arena);
-    var interp: Interp = try .init(arena, source, &out.writer);
+    var interp: Interp = try .init(arena, source, &out.writer, .{});
     try interp.run();
     return out.written();
 }
 
 fn expectOutput(source: []const u8, expected: []const u8) !void {
-    if (config.trace) return error.SkipZigTest; // trace lines go to the same output
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     try testing.expectEqualStrings(expected, try runProgram(arena.allocator(), source));
@@ -676,7 +868,6 @@ test "print: dotted pairs and nested lists" {
 }
 
 test "print: closures show body and environment address" {
-    if (config.trace) return error.SkipZigTest; // trace lines go to the same output
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const out = try runProgram(arena.allocator(), "((1 x) print)");
@@ -685,7 +876,6 @@ test "print: closures show body and environment address" {
 }
 
 test "print: primitives show an address" {
-    if (config.trace) return error.SkipZigTest; // trace lines go to the same output
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const out = try runProgram(arena.allocator(), "('car push print)");
@@ -772,15 +962,279 @@ test "failure: push of a non-atom key" {
 }
 
 test "failure: end of input inside a list" {
-    try expectFailure("(1 2", error.EndOfInput);
+    try expectFailure("(1 2", error.UnclosedList);
 }
 
 test "failure: empty program" {
     try expectFailure(" ; nothing\n", error.EndOfInput);
 }
 
+const countdown_prelude =
+    \\($x x) $force
+    \\(force cswap $_ force) $if
+    \\($f $t $c $fn ^f ^t ^c fn) $endif
+    \\() $[ () $]
+    \\($f ($x (^x x) f) ($x (^x x) f) force) $Y
+    \\($g (^g Y)) $rec
+    \\($self $n ^if [ ^n 0 eq 0 ] ([ ^n 1 - ] self) endif) rec $count
+;
+
+test "calls: a loop written with tail calls does not grow the native stack" {
+    try expectOutput("(" ++ countdown_prelude ++ " 100000 count print)", "0\n");
+}
+
+test "calls: recursion deeper than max_depth fails cleanly" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var out: Writer.Allocating = .init(arena.allocator());
+    // g calls itself and then pushes 1, so the call is not a tail call.
+    var interp: Interp = try .init(arena.allocator(), "(($f ^f f 1) $g ^g g)", &out.writer, .{ .max_depth = 1000 });
+    try testing.expectError(error.RecursionTooDeep, interp.run());
+    try testing.expectEqual(1000, interp.frames.items.len);
+}
+
+test "read and print: lists nested a million deep" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const depth = 1_000_000;
+    const nested = try arena.allocator().alloc(u8, 2 * depth);
+    @memset(nested[0..depth], '(');
+    @memset(nested[depth..], ')');
+    const source = try std.mem.concat(arena.allocator(), u8, &.{ "('", nested, " print)" });
+    const expected = try std.mem.concat(arena.allocator(), u8, &.{ nested, "\n" });
+    try expectOutput(source, expected);
+}
+
+test "trace: prints compute and eval lines in forsp.c's order" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var out: Writer.Allocating = .init(arena.allocator());
+    var interp: Interp = try .init(arena.allocator(), "(1 $x ('a) $f f ^x print)", &out.writer, .{ .trace = true });
+    try interp.run();
+    try testing.expectEqualStrings(
+        \\compute: (1 quote x pop (quote a) quote f pop f quote x push print)
+        \\eval: 1
+        \\eval: pop
+        \\eval: (quote a)
+        \\eval: pop
+        \\eval: f
+        \\compute: (quote a)
+        \\eval: push
+        \\eval: print
+        \\1
+        \\
+    , out.written());
+}
+
+fn hostIncrement(interp: *Interp, _: **Object) Error!void {
+    const n = try interp.pop();
+    if (n.tag != .num) return interp.fail("inc expects a number");
+    try interp.push(try interp.makeNum(n.as.num + 1));
+}
+
+const host_primitives = [_]Primitive{.{ .name = "inc", .func = hostIncrement }};
+
+test "embedding: host primitives run alongside the built-in ones" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var out: Writer.Allocating = .init(arena.allocator());
+    var interp: Interp = try .init(arena.allocator(), "(41 inc print 'inc push tag print)", &out.writer, .{ .primitives = &host_primitives });
+    try interp.run();
+    try testing.expectEqualStrings("42\n5\n", out.written());
+}
+
+test "embedding: a host primitive can fail with its own message" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var out: Writer.Allocating = .init(arena.allocator());
+    var interp: Interp = try .init(arena.allocator(), "('a inc)", &out.writer, .{ .primitives = &host_primitives });
+    const err = interp.run();
+    try testing.expectError(error.PrimitiveFailed, err);
+    var msg: Writer.Allocating = .init(arena.allocator());
+    try interp.writeFailure(error.PrimitiveFailed, &msg.writer);
+    try testing.expectEqualStrings("FAIL: inc expects a number\n", msg.written());
+}
+
+test "embedding: evalBody keeps definitions and the stack between calls" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var out: Writer.Allocating = .init(arena.allocator());
+    var interp: Interp = try .init(arena.allocator(), "", &out.writer, .{});
+    try interp.evalBody("5 $x");
+    try interp.evalBody("^x ^x * print 7");
+    try interp.evalBody("print");
+    // Ending with a call (a tail call) still keeps the definitions made before it.
+    try interp.evalBody("(1 print) $one 2 $two one");
+    try interp.evalBody("^two print");
+    try testing.expectEqualStrings("25\n7\n1\n2\n", out.written());
+}
+
+/// Runs `source` with `options`, expects it to fail, and returns the diagnostic.
+fn failureText(arena: Allocator, source: []const u8, options: Options) ![]u8 {
+    var out: Writer.Allocating = .init(arena);
+    var interp: Interp = try .init(arena, source, &out.writer, options);
+    interp.run() catch |err| {
+        var msg: Writer.Allocating = .init(arena);
+        try interp.writeFailure(err, &msg.writer);
+        return msg.written();
+    };
+    return error.TestUnexpectedSuccess;
+}
+
+test "diagnostics: an unclosed list names where its ( is" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    try testing.expectEqualStrings(
+        \\FAIL: End of input: could not read()
+        \\  unclosed '(' at line 2, column 3
+        \\
+    , try failureText(arena.allocator(), "(1\n  (2 3\n", .{}));
+}
+
+test "diagnostics: a failure names the closures being run, innermost first" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    try testing.expectEqualStrings(
+        \\FAIL: Failed to find in key='nope' in environment
+        \\  in: inner <- outer
+        \\
+    , try failureText(arena.allocator(), "((nope 1) $inner (inner 1) $outer outer)", .{}));
+}
+
+test "diagnostics: a tail call replaces its caller in the chain" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    try testing.expectEqualStrings(
+        \\FAIL: Failed to find in key='nope' in environment
+        \\  in: inner
+        \\
+    , try failureText(arena.allocator(), "((nope 1) $inner (inner) $outer outer)", .{}));
+}
+
+test "diagnostics: a long chain shows the innermost ten closures" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    try testing.expectEqualStrings(
+        \\FAIL: Recursion too deep
+        \\  in: f <- f <- f <- f <- f <- f <- f <- f <- f <- f <- ... (4 more)
+        \\
+        // g is called once by name, then calls itself through the name f.
+    , try failureText(arena.allocator(), "(($f ^f f 1) $g ^g g)", .{ .max_depth = 15 }));
+}
+
+test "diagnostics: a failure at the top level has no chain" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    try testing.expectEqualStrings(
+        "FAIL: Value Stack Underflow\n",
+        try failureText(arena.allocator(), "(print)", .{}),
+    );
+}
+
+test "fuzz: printing what was read reads back to the same text" {
+    try testing.fuzz({}, fuzzReadPrint, .{ .corpus = &.{
+        "(1 (2 3) x)",
+        "('a ^b $c)",
+        "((((",
+        "))",
+        "(12abc -0 00 +5 -)",
+        "; comment\n(a\tb\rc)",
+        "(1 2 . 3)",
+    } });
+}
+
+fn fuzzReadPrint(_: void, smith: *testing.Smith) !void {
+    var buffer: [256]u8 = undefined;
+    const len = smith.sliceWeightedBytes(&buffer, &.{
+        .rangeAtMost(u8, 0x00, 0xff, 1),
+        .rangeAtMost(u8, 'a', 'e', 4),
+        .rangeAtMost(u8, '0', '9', 4),
+        .value(u8, '(', 8),
+        .value(u8, ')', 8),
+        .value(u8, ' ', 6),
+        .value(u8, '\n', 2),
+        .value(u8, '\'', 3),
+        .value(u8, '^', 3),
+        .value(u8, '$', 3),
+        .value(u8, ';', 2),
+        .value(u8, '-', 2),
+    });
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+
+    const first = try readAndPrint(arena.allocator(), buffer[0..len]) orelse return;
+    // An empty atom (from a directive or `)` with no name) prints as nothing,
+    // so its text cannot read back.
+    if (first.has_empty_atom) return;
+    const second = try readAndPrint(arena.allocator(), first.text) orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings(first.text, second.text);
+}
+
+/// Reads the first object of `input` and prints it, or null if the input has none.
+fn readAndPrint(arena: Allocator, input: []const u8) !?struct { text: []const u8, has_empty_atom: bool } {
+    var out: Writer.Allocating = .init(arena);
+    var interp: Interp = try .init(arena, input, &out.writer, .{});
+    const obj = interp.read() catch |err| switch (err) {
+        error.EndOfInput, error.UnclosedList => return null,
+        else => return err,
+    };
+    try interp.printObject(obj);
+    return .{ .text = out.written(), .has_empty_atom = hasEmptyAtom(&interp, obj) };
+}
+
+fn hasEmptyAtom(interp: *Interp, obj: *Object) bool {
+    return switch (obj.tag) {
+        .atom => obj.as.atom[0] == 0,
+        .pair => obj != interp.state.nil and
+            (hasEmptyAtom(interp, obj.as.pair.car) or hasEmptyAtom(interp, obj.as.pair.cdr)),
+        else => false,
+    };
+}
+
+test "intern: one atom per name, and every atom stays on interned_atoms" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var out: Writer.Allocating = .init(arena.allocator());
+    var interp: Interp = try .init(arena.allocator(), "", &out.writer, .{});
+    const a = try interp.intern("alpha");
+    try testing.expectEqual(a, try interp.intern("alpha"));
+    try testing.expect(a != try interp.intern("beta"));
+    try testing.expectEqual(a, try interp.intern("alpha"));
+
+    var names: usize = 0;
+    var found = false;
+    var list = interp.state.interned_atoms;
+    while (list != interp.state.nil) : (list = list.as.pair.cdr) {
+        names += 1;
+        if (list.as.pair.car == a) found = true;
+    }
+    try testing.expect(found);
+    // The built-in names (t, quote, and the primitives) plus alpha and beta.
+    try testing.expectEqual(2 + builtins.len + 2, names);
+}
+
+test "embedding: evalBody reads a stray ) as the empty atom, as file mode does" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var out: Writer.Allocating = .init(arena.allocator());
+    var interp: Interp = try .init(arena.allocator(), "", &out.writer, .{ .max_depth = 100 });
+    try testing.expectError(error.UnboundAtom, interp.evalBody("1 print )"));
+    try testing.expectEqualStrings("", std.mem.span(interp.unbound.?.as.atom));
+    try testing.expectError(error.UnboundAtom, interp.evalBody("^)"));
+    try testing.expectEqualStrings("1\n", out.written());
+}
+
+test "embedding: evalBody keeps definitions made before a failure" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var out: Writer.Allocating = .init(arena.allocator());
+    var interp: Interp = try .init(arena.allocator(), "", &out.writer, .{});
+    try testing.expectError(error.UnboundAtom, interp.evalBody("5 $x nope"));
+    try interp.evalBody("^x print");
+    try testing.expectEqualStrings("5\n", out.written());
+}
+
 test "golden: every example prints what forsp.c prints" {
-    if (config.trace) return error.SkipZigTest; // trace lines go to the same output
     const names = @import("examples").names;
     const needs_lowlevel = [_][]const u8{ "fibonacci-imperative", "low-level" };
     inline for (names) |name| skip: {

@@ -14,6 +14,9 @@ const examples = [_][]const u8{
     "tutorial",
 };
 
+/// Programs timed by `zig build bench`, from `tests/bench/<name>.fp`.
+const benchmarks = [_][]const u8{ "atoms", "countdown", "fib", "sum" };
+
 // Although this function looks imperative, it does not perform the build
 // directly and instead it mutates the build graph (`b`) that will be then
 // executed by an external runner. The functions in `std.Build` implement a DSL
@@ -34,11 +37,10 @@ pub fn build(b: *std.Build) void {
     // of this build script using `b.option()`. All defined flags (including
     // target and optimize options) will be listed when running `zig build --help`
     // in this directory.
-    
-    // Mirror the C interpreter's DEBUG and USE_LOWLEVEL parameters.
+
+    // Mirror the C interpreter's USE_LOWLEVEL parameter; DEBUG is the
+    // runtime --trace flag.
     const options = b.addOptions();
-    const trace = b.option(bool, "trace", "Print every compute/eval step (C: DEBUG)") orelse false;
-    options.addOption(bool, "trace", trace);
     options.addOption(bool, "lowlevel", b.option(bool, "lowlevel", "Define the ptr-*! primitives (C: USE_LOWLEVEL)") orelse true);
 
     // This creates a module, which represents a collection of source files alongside
@@ -158,11 +160,11 @@ pub fn build(b: *std.Build) void {
     const tests = b.addTest(.{ .root_module = test_mod });
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
-    
+
     // End-to-end checks of the executable's arguments, output and exit codes.
     const cli_ok = b.addRunArtifact(exe);
     cli_ok.addFileArg(b.path("examples/factorial.fp"));
-    if (!trace) cli_ok.expectStdOutEqual("120\n"); // trace lines share stdout
+    cli_ok.expectStdOutEqual("120\n");
     cli_ok.expectExitCode(0);
     test_step.dependOn(&cli_ok.step);
 
@@ -177,13 +179,68 @@ pub fn build(b: *std.Build) void {
     cli_missing.expectExitCode(1);
     test_step.dependOn(&cli_missing.step);
 
+    const cli_trace = b.addRunArtifact(exe);
+    cli_trace.addArg("--trace");
+    cli_trace.addFileArg(b.path("tests/cli/trace.fp"));
+    cli_trace.expectStdOutEqual("compute: (1 print)\neval: 1\neval: print\n1\n");
+    cli_trace.expectExitCode(0);
+    test_step.dependOn(&cli_trace.step);
+
+    const cli_stdin = b.addRunArtifact(exe);
+    cli_stdin.addArg("-");
+    cli_stdin.setStdIn(.{ .bytes = "(6 7 * print)" });
+    cli_stdin.expectStdOutEqual("42\n");
+    cli_stdin.expectExitCode(0);
+    test_step.dependOn(&cli_stdin.step);
+
+    // Definitions persist across lines, a list can span lines, and a failure
+    // is reported without ending the session (but sets the exit code).
+    const cli_repl = b.addRunArtifact(exe);
+    cli_repl.addArg("--repl");
+    cli_repl.setStdIn(.{ .bytes = "5 $x\n^x print\n'(1\n2) $l ^l print\nnope\n^x ^x * print" });
+    cli_repl.expectStdOutEqual("5\n(1 2)\n25\n");
+    cli_repl.expectStdErrEqual("FAIL: Failed to find in key='nope' in environment\n");
+    cli_repl.expectExitCode(1);
+    test_step.dependOn(&cli_repl.step);
+
+    const cli_repl_ok = b.addRunArtifact(exe);
+    cli_repl_ok.addArgs(&.{ "--trace", "--repl" });
+    cli_repl_ok.setStdIn(.{ .bytes = "1 print\n" });
+    cli_repl_ok.expectStdOutEqual("compute: (1 print)\neval: 1\neval: print\n1\n");
+    cli_repl_ok.expectExitCode(0);
+    test_step.dependOn(&cli_repl_ok.step);
+
     // Output printed before a failure is still flushed.
     const cli_fail = b.addRunArtifact(exe);
     cli_fail.addFileArg(b.path("tests/cli/unbound.fp"));
-    if (!trace) cli_fail.expectStdOutEqual("2\n");
+    cli_fail.expectStdOutEqual("2\n");
     cli_fail.expectStdErrEqual("FAIL: Failed to find in key='nope' in environment\n");
     cli_fail.expectExitCode(1);
     test_step.dependOn(&cli_fail.step);
+
+    // The C reference, for tests/diff.py and for recording expected output.
+    const cref = b.addExecutable(.{
+        .name = "forsp-c",
+        .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true }),
+    });
+    // forsp.c relies on C's wrapping and shifting behaviour, as the C build does.
+    cref.root_module.addCSourceFile(.{ .file = b.path("forsp.c"), .flags = &.{"-fno-sanitize=undefined"} });
+    b.step("cref", "Build forsp.c as zig-out/bin/forsp-c").dependOn(&b.addInstallArtifact(cref, .{}).step);
+
+    // Times each benchmark program in-process; quote ReleaseFast numbers.
+    const bench_exe = b.addExecutable(.{
+        .name = "bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/bench.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "forsp", .module = forsp }},
+        }),
+    });
+    const bench_run = b.addRunArtifact(bench_exe);
+    inline for (benchmarks) |name| bench_run.addFileArg(b.path("tests/bench/" ++ name ++ ".fp"));
+    bench_run.has_side_effects = true; // always re-run, never cached
+    b.step("bench", "Time the programs in tests/bench/").dependOn(&bench_run.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.
     //

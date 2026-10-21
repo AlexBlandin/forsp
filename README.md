@@ -112,15 +112,28 @@ Examples:
 
 ## Zig Port
 
-`src/forsp.zig` is a port of `forsp.c` to Zig 0.17, including `DEBUG` (as `-Dtrace=true`) and `USE_LOWLEVEL` (as `-Dlowlevel=true`).
+`src/forsp.zig` is a port of `forsp.c` to Zig 0.17, including `DEBUG` (as the `--trace` flag) and `USE_LOWLEVEL` (as `-Dlowlevel=true`).
 
 ```
-zig build -Doptimize=ReleaseFast       # builds the zig-out/bin/forsp binary
-zig build run -- examples/tutorial.fp  # builds and runs a program
-zig build test                         # builds and runs tests
+zig build -Doptimize=ReleaseFast                 # builds the zig-out/bin/forsp binary
+zig build run -- examples/tutorial.fp            # builds and runs a program
+zig build test                                   # builds and runs tests
+zig build bench -Doptimize=ReleaseFast           # times the programs in tests/bench/
+zig build test --fuzz=1M -Doptimize=ReleaseSafe  # fuzzes the reader and printer
+zig build install cref && uv run tests/diff.py   # compares random programs with forsp.c
 ```
 
-A few fixes were added:
+Fuzzing with Smith currently needs LLVM, so use `-Doptimize=ReleaseSafe`.
+
+```
+forsp [--trace] <path>  # runs a program; a path of - reads it from stdin
+forsp [--trace] --repl  # runs stdin line by line, keeping definitions
+```
+
+Some fixes and changes were made:
 
 - Popping an empty stack reports `Value Stack Underflow`
 - Explicitly wraps (for arithmetic) or saturates (0/-1 for shifts) on overflow
+- Closure calls, reading, and printing do not use the native stack, and we apply tail-call optimisation
+  - Without tail-calls, recursion stops at ~1M deep
+- Somewhat more helpful error messages
